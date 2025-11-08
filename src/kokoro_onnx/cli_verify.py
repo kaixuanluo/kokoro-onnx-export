@@ -8,8 +8,8 @@ import soundfile as sf
 import torch
 import typer
 from huggingface_hub import hf_hub_download
-from kokoro.model import KModel, KModelForONNX
-from kokoro.pipeline import KPipeline
+from kokoro.kokoro.model import KModel, KModelForONNX
+from kokoro.kokoro.pipeline import KPipeline
 
 from .cli import app
 from .util import execution_providers, mel_spectrogram_distance
@@ -19,10 +19,10 @@ from .util import execution_providers, mel_spectrogram_distance
 def verify(
     onnx_path: str = typer.Option("kokoro.onnx", help="Path to the ONNX model file"),
     text: str = typer.Option(
-        "Our quantization tool supports three calibration methods: MinMax, Entropy and Percentile. Please refer to calibrate.py for details.",
+        "你好，这是一个测试。",
         help="Input text to synthesize",
     ),
-    voice: str = typer.Option("af_heart", help="Voice ID to use"),
+    voice: str = typer.Option("zf_001", help="Voice ID to use"),
     output_dir: Optional[str] = typer.Option(
         None, help="Directory to save audio files. If None, uses current directory"
     ),
@@ -43,19 +43,24 @@ def verify(
     Returns:
         float: Mean squared error between PyTorch and ONNX outputs
     """
-    # Initialize the pipeline
-    pipeline = KPipeline(lang_code="a", model=False)
+    # --- MODIFIED: Load model first, then pass to pipeline and wrapper ---
+    local_model_dir = "/home/luokaixuan/a/workspace/python/kokoro-onnx-export/Kokoro-82M-v1.1-student-zh"
+    config_path = os.path.join(local_model_dir, "config.json")
+    model_path = os.path.join(local_model_dir, "kokoro-v1_1-zh.pth")
 
-    # Load vocabulary from Hugging Face
-    repo_id = "hexgrad/Kokoro-82M"
-    config_filename = "config.json"
-    config_path = hf_hub_download(repo_id=repo_id, filename=config_filename)
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    vocab = config["vocab"]
+    print(f"Verify: Loading model from local path: {model_path}")
 
-    # Initialize the KModel
-    torch_model = KModelForONNX(KModel()).eval()
+    # 1. Load the base KModel from local files
+    kmodel = KModel(config=config_path, model=model_path)
+
+    # 2. Initialize the pipeline WITH the loaded model
+    pipeline = KPipeline(lang_code=voice[0], model=kmodel, repo_id="hexgrad/Kokoro-82M-v1.1-zh")
+
+    # 3. Initialize the ONNX wrapper WITH the same loaded model
+    torch_model = KModelForONNX(kmodel).eval()
+
+    # Load vocabulary from the loaded model's config
+    vocab = kmodel.vocab
 
     # Tokenize and phonemize
     _, tokens = pipeline.g2p(text)

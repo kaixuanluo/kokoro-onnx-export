@@ -4,7 +4,7 @@ from pathlib import Path
 import onnx
 import torch
 import typer
-from kokoro.model import KModel, KModelForONNX
+from kokoro.kokoro.model import KModel, KModelForONNX
 from onnxruntime.quantization import shape_inference
 from onnxruntime.quantization.quant_utils import add_infer_metadata
 from rich import print
@@ -56,11 +56,19 @@ def export(
     dummy_speed: float = 0.95
     opset_version: int = 20
 
-    # Initialize model
+    # --- MODIFIED: Use local model files instead of downloading ---
+    # Path to your pre-downloaded model directory
+    local_model_dir = "/home/luokaixuan/a/workspace/python/kokoro-onnx-export/Kokoro-82M-v1.1-student-zh"
+    config_path = f"{local_model_dir}/config.json"
+    model_path = f"{local_model_dir}/kokoro-v1_1-zh.pth"
+
+    print(f"Loading model from local path: {model_path}")
+
+    # Initialize model from the local path
     if export_duration:
-        model = KModelForONNXWithDuration(KModel(disable_complex=True)).eval()
+        model = KModelForONNXWithDuration(KModel(config=config_path, model=model_path, disable_complex=True)).eval()
     else:
-        model = KModelForONNX(KModel(disable_complex=True)).eval()
+        model = KModelForONNX(KModel(config=config_path, model=model_path, disable_complex=True)).eval()
 
     # Create dummy inputs
     input_ids = torch.zeros((batch_size, dummy_seq_length), dtype=torch.long)

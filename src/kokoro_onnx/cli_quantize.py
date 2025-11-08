@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -14,6 +15,8 @@ from onnxruntime.quantization import (
     quantize_static,
 )
 
+from kokoro.kokoro.model import KModel
+from kokoro.kokoro.pipeline import KPipeline
 from kokoro_onnx.quantize import (
     QUANT_RULES,
     CsvCalibrationDataReader,
@@ -24,7 +27,7 @@ from kokoro_onnx.quantize import (
     run_quantization_trials,
     select_node_datatypes,
 )
-from kokoro_onnx.util import execution_providers, load_vocab
+from kokoro_onnx.util import execution_providers
 
 from .cli import app
 from .convert_float_to_float16 import convert_float_to_float16
@@ -34,6 +37,39 @@ from .util import (
     get_onnx_inputs,
     mel_spectrogram_distance,
 )
+
+# --- DEBUG: Monkey-patch KModel to inspect config ---
+import json
+original_kmodel_init = KModel.__init__
+
+def patched_kmodel_init(self, *args, **kwargs):
+    print("\n--- KModel Monkey-Patch DEBUG ---")
+    config_arg = kwargs.get('config')
+    if config_arg:
+        try:
+            if isinstance(config_arg, str):
+                with open(config_arg, 'r') as f:
+                    config_dict = json.load(f)
+            else:
+                config_dict = config_arg
+            
+            hidden_dim = config_dict.get('hidden_dim')
+            print(f"[DEBUG] hidden_dim found in config: {hidden_dim}")
+            
+            istftnet_config = config_dict.get('istftnet', {})
+            upsample_channel = istftnet_config.get('upsample_initial_channel')
+            print(f"[DEBUG] istftnet.upsample_initial_channel: {upsample_channel}")
+        except Exception as e:
+            print(f"[DEBUG] Error while inspecting config: {e}")
+    else:
+        print("[DEBUG] No 'config' argument found in KModel kwargs.")
+    
+    print("--- Calling original KModel.__init__ ---")
+    original_kmodel_init(self, *args, **kwargs)
+    print("--- Returned from original KModel.__init__ ---")
+
+KModel.__init__ = patched_kmodel_init
+# --- END DEBUG ---
 
 
 @app.command()
@@ -86,23 +122,38 @@ def trial_quantization(
 
     print(f"Found {len(nodes_to_reduce)} nodes to evaluate")
 
+    # --- MODIFIED FOR OFFLINE USE ---
+    print("Initializing offline model and pipeline for trials...")
+    local_model_dir = "/home/luokaixuan/a/workspace/python/kokoro-onnx-export/Kokoro-82M-v1.1-student-zh"
+    config_path = os.path.join(local_model_dir, "config.json")
+    kokoro_model_path = os.path.join(local_model_dir, "kokoro-v1_1-zh.pth")
+    kmodel = KModel(config=config_path, model=kokoro_model_path)
+    vocab = kmodel.vocab  # Get vocab from the loaded model
+    inputs = get_onnx_inputs(KPipeline(lang_code=eval_voice[0], model=kmodel, repo_id="hexgrad/Kokoro-82M-v1.1-zh"), eval_voice, eval_text, vocab)
+
+    init_session = ort.InferenceSession(model.SerializeToString())
+    init_outputs = init_session.run(None, inputs)[0]
+    del init_session
+
     print("Running float16 trials...")
     run_float16_trials(
         model_path=onnx_path,
         selections=nodes_to_reduce,
         output_file=Path(output_path),
-        test_text=eval_text,
-        test_voice=eval_voice,
+        inputs=inputs,
+        init_outputs=init_outputs,
     )
     print("Running quantization trials...")
-    data_reader = CsvCalibrationDataReader(calibration_data, samples)
+    data_reader = CsvCalibrationDataReader(
+        calibration_data, samples, vocab=vocab, model=kmodel, repo_id="hexgrad/Kokoro-82M-v1.1-zh"
+    )
     run_quantization_trials(
         model_path=onnx_path,
         calibration_data_reader=data_reader,
         selections=nodes_to_reduce,
         output_file=Path(output_path),
-        test_text=eval_text,
-        test_voice=eval_voice,
+        inputs=inputs,
+        init_outputs=init_outputs,
         static=static,
     )
 
@@ -220,9 +271,15 @@ def export_optimized(
     original_size = Path(onnx_path).stat().st_size / (1024 * 1024)
     print(f"Original model size: {original_size:.2f} MB")
 
-    # Get test inputs and original outputs for comparison
-    vocab = load_vocab()
-    inputs = get_onnx_inputs(eval_voice, eval_text, vocab)
+    # --- MODIFIED FOR OFFLINE USE ---
+    print("Initializing offline model and pipeline for trials...")
+    local_model_dir = "/home/luokaixuan/a/workspace/python/kokoro-onnx-export/Kokoro-82M-v1.1-student-zh"
+    config_path = os.path.join(local_model_dir, "config.json")
+    kokoro_model_path = os.path.join(local_model_dir, "kokoro-v1_1-zh.pth")
+    kmodel = KModel(config=config_path, model=kokoro_model_path)
+    pipeline = KPipeline(lang_code=eval_voice[0], model=kmodel, repo_id='hexgrad/Kokoro-82M-v1.1-zh')
+    vocab = kmodel.vocab  # Get vocab from the loaded model
+    inputs = get_onnx_inputs(pipeline, eval_voice, eval_text, vocab)
     sess = ort.InferenceSession(
         model.SerializeToString(), providers=execution_providers
     )
@@ -291,7 +348,7 @@ def export_optimized(
 
         if quant_static:
             data_reader = CsvCalibrationDataReader(
-                "data/quant-calibration.csv", samples
+                "data/quant-calibration.csv", samples, vocab=vocab, model=kmodel, repo_id="hexgrad/Kokoro-82M-v1.1-zh"
             )
             quantize_static(
                 model_input=temp_path,

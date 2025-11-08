@@ -1,4 +1,9 @@
+import copy
 import csv
+import io
+import os
+import os
+import os
 import os
 import re
 import tempfile
@@ -137,11 +142,13 @@ def run_quantization_trials(
     calibration_data_reader: CalibrationDataReader,
     selections: list["NodeToReduce"],
     output_file: Path,
-    test_text: str,
-    test_voice: str,
+    inputs: dict[str, np.ndarray],
+    init_outputs: np.ndarray,
     static: bool = False,
 ):
-    model = onnx.load(model_path)
+    with open(model_path, "rb") as f:
+        model_bytes = f.read()
+    model = onnx.load(io.BytesIO(model_bytes))
 
     initializers = build_initializer_lookup(model.graph)
 
@@ -162,13 +169,6 @@ def run_quantization_trials(
         with open(output_file, "w") as f:
             f.write("name,type,op_type,mel_distance\n")
 
-    vocab = load_vocab()
-    inputs = get_onnx_inputs(test_voice, test_text, vocab)
-
-    init_session = ort.InferenceSession(model.SerializeToString())
-    init_outputs = init_session.run(None, inputs)[0]
-    del init_session
-
     print("Extracting tensor ranges...")
     op_types_to_quantize = [
         rule.op
@@ -177,7 +177,9 @@ def run_quantization_trials(
     ]
 
     tensors_range = (
-        extract_tensors_range(model, calibration_data_reader, op_types_to_quantize)
+        extract_tensors_range(
+            model, calibration_data_reader, op_types_to_quantize
+        )
         if static
         else TensorsData(CalibrationMethod.MinMax, {})
     )
@@ -221,7 +223,7 @@ def run_quantization_trials(
 
             nodes_to_quantize = [node.name]
 
-            model = onnx.load(model_path)
+            model = onnx.load(io.BytesIO(model_bytes))
             if static:
                 quantized = quantize_model_static(
                     model,
@@ -257,10 +259,12 @@ def run_float16_trials(
     model_path: str,
     selections: list["NodeToReduce"],
     output_file: Path,
-    test_text: str,
-    test_voice: str,
+    inputs: dict[str, np.ndarray],
+    init_outputs: np.ndarray,
 ):
-    model = onnx.load(model_path)
+    with open(model_path, "rb") as f:
+        model_bytes = f.read()
+    model = onnx.load(io.BytesIO(model_bytes))
 
     # Load existing results to skip completed trials
     completed_trials = set()
@@ -278,13 +282,6 @@ def run_float16_trials(
     if not output_file.exists():
         with open(output_file, "w") as f:
             f.write("name,type,op_type,params,size,mel_distance\n")
-
-    vocab = load_vocab()
-    inputs = get_onnx_inputs(test_voice, test_text, vocab)
-
-    init_session = ort.InferenceSession(model.SerializeToString())
-    init_outputs = init_session.run(None, inputs)[0]
-    del init_session
 
     # Count remaining trials
     remaining_trials = [
@@ -322,7 +319,7 @@ def run_float16_trials(
                 progress.advance(task)
                 continue
 
-            model = onnx.load(model_path)
+            model = onnx.load(io.BytesIO(model_bytes))
             node_block_list = [n.name for n in model.graph.node if n.name != node.name]
             converted = convert_float_to_float16(
                 model,
@@ -557,9 +554,15 @@ class CsvCalibrationDataReader(CalibrationDataReader):
         self,
         path: str,
         samples: Optional[int] = None,
-        vocab: Optional[dict[str, int]] = None,
+        vocab: dict[str, int] = None,
+        model: any = None,  # Changed from pipeline to model
+        repo_id: str = None,  # Added repo_id
     ):
-        self.vocab = vocab or load_vocab()
+        self.path = path
+        self.samples = samples
+        self.vocab = vocab
+        self.model = model  # Store model
+        self.repo_id = repo_id  # Store repo_id
         # Load calibration data using csv module
         calibration_rows = []
         with open(path, "r", newline="", encoding="utf-8") as f:
@@ -584,11 +587,15 @@ class CsvCalibrationDataReader(CalibrationDataReader):
             self.progress.start()
         try:
             row = next(self.enum_data)
-            # Extract language code from first character of voice name
-            """Process a single row of calibration data."""
             text = row["Text"]
             voice = row["Voice"]
-            processed = get_onnx_inputs(voice, text, self.vocab)
+            lang_code = voice[0]
+
+            # Create a new, language-correct pipeline for each sample
+            from kokoro.kokoro.pipeline import KPipeline
+            pipeline = KPipeline(lang_code=lang_code, model=self.model, repo_id=self.repo_id)
+
+            processed = get_onnx_inputs(pipeline, voice, text, self.vocab)
             self.progress.advance(self.task)
             self.progress.refresh()
             return processed

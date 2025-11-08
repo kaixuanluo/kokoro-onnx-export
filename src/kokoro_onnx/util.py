@@ -6,7 +6,7 @@ import onnx
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
-from kokoro.pipeline import KPipeline
+from kokoro.kokoro.pipeline import KPipeline
 from onnx import TensorProto
 
 execution_providers = [
@@ -140,15 +140,15 @@ def mel_spectrogram_distance(
 
 
 def get_onnx_inputs(
-    voice: str, text: str, vocab: dict[str, int]
+    pipeline: KPipeline, voice: str, text: str, vocab: dict[str, int]
 ) -> dict[str, np.ndarray]:
-    """Process text into corresponding ONNX inputs."""
+    """MODIFIED FOR OFLINE USE: Process text into corresponding ONNX inputs."""
 
-    lang_code = voice[0]
-    pipeline = KPipeline(lang_code=lang_code, model=False)
+    # The pipeline is now passed in, not created here.
 
     # Get tokens from pipeline
-    for result in pipeline(text):
+    phoneme_output = []
+    for result in pipeline(text, voice=voice):
         phoneme_output = result[1]
         break
 
@@ -158,7 +158,8 @@ def get_onnx_inputs(
 
     # Load and process the style vector
     ref_s = pipeline.load_voice(voice)
-    ref_s = ref_s[input_ids.shape[1] - 1]
+    idx = min(input_ids.shape[1] - 1, ref_s.shape[0] - 1)
+    ref_s = ref_s[idx]
 
     return {
         "input_ids": input_ids.numpy(),
